@@ -1,0 +1,187 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: plant-disease-detector
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: plant-disease-detector
+data:
+  MODEL_PATH: "/app/models/best_model.pth"
+  LOG_LEVEL: "INFO"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage
+  namespace: plant-disease-detector
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plant-disease-api
+  namespace: plant-disease-detector
+  labels:
+    app: plant-disease-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: plant-disease-api
+  template:
+    metadata:
+      labels:
+        app: plant-disease-api
+    spec:
+      containers:
+      - name: api
+        image: your-registry/plant-disease-detector:api-latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        envFrom:
+        - configMapRef:
+            name: app-config
+        volumeMounts:
+        - name: model-storage
+          mountPath: /app/models
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plant-disease-api-service
+  namespace: plant-disease-detector
+spec:
+  selector:
+    app: plant-disease-api
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8000
+  type: LoadBalancer
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plant-disease-web
+  namespace: plant-disease-detector
+  labels:
+    app: plant-disease-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: plant-disease-web
+  template:
+    metadata:
+      labels:
+        app: plant-disease-web
+    spec:
+      containers:
+      - name: web
+        image: your-registry/plant-disease-detector:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8501
+          name: http
+        envFrom:
+        - configMapRef:
+            name: app-config
+        volumeMounts:
+        - name: model-storage
+          mountPath: /app/models
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plant-disease-web-service
+  namespace: plant-disease-detector
+spec:
+  selector:
+    app: plant-disease-web
+  ports:
+  - protocol: TCP
+    port: 8501
+    targetPort: 8501
+  type: LoadBalancer
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: plant-disease-api-hpa
+  namespace: plant-disease-detector
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: plant-disease-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

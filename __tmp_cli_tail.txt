@@ -1,0 +1,200 @@
+    
+    # Save report
+    save_evaluation_report(metrics, y_true, y_pred, class_names, output)
+    
+    logger.info("Evaluation completed successfully!")
+
+
+@main.command()
+@click.option('--model', required=True, help='Path to trained model file')
+@click.option('--image', required=True, help='Path to input image')
+@click.option('--topk', default=3, help='Number of top predictions')
+@click.option('--threshold', default=0.0, type=float, help='Confidence threshold')
+@click.option('--explain', is_flag=True, help='Generate Grad-CAM visualization')
+@click.option('--output', default=None, help='Output directory for results')
+def predict(model, image, topk, threshold, explain, output):
+    """Predict disease class for a single image."""
+    
+    setup_logging(log_level='INFO')
+    
+    if output:
+        ensure_dir(output)
+    
+    # Device
+    device = get_device()
+    
+    # Load class names
+    model_dir = os.path.dirname(model)
+    class_names_path = os.path.join(model_dir, 'class_names.txt')
+    
+    with open(class_names_path, 'r') as f:
+        class_names = [line.strip() for line in f if line.strip()]
+    
+    # Create predictor
+    predictor = PlantDiseasePredictor(
+        model_path=model,
+        class_names=class_names,
+        device=device,
+        threshold=threshold
+    )
+    
+    # Predict
+    result = predictor.predict(image, topk=topk)
+    
+    # Print result
+    print("\n" + "=" * 80)
+    print(f"Image: {result['image']}")
+    print("=" * 80)
+    print(f"Top Prediction: {result['top1']} (confidence: {result['top1_probability']:.4f})")
+    print(f"Uncertain: {result['uncertain']}")
+    print("\nTop-{} Predictions:".format(topk))
+    for i, pred in enumerate(result['predictions'], 1):
+        print(f"  {i}. {pred['label']}: {pred['probability']:.4f}")
+    print("=" * 80)
+    
+    # Save result
+    if output:
+        result_path = os.path.join(output, 'prediction.json')
+        save_json(result, result_path)
+        logger.info(f"Prediction saved to {result_path}")
+    
+    # Generate Grad-CAM
+    if explain:
+        logger.info("Generating Grad-CAM explanation...")
+        
+        import cv2
+        from src.data.augmentations import load_and_preprocess_image
+        
+        # Load image
+        preprocessed, original = load_and_preprocess_image(image)
+        input_tensor = preprocessed.unsqueeze(0).to(device)
+        
+        # Generate Grad-CAM
+        gradcam = GradCAM(predictor.model)
+        
+        overlay_path = os.path.join(output or '.', 'gradcam_overlay.jpg') if output else 'gradcam_overlay.jpg'
+        gradcam.save_visualization(original, input_tensor, overlay_path, alpha=0.4)
+        
+        print(f"\nGrad-CAM visualization saved to: {overlay_path}")
+
+
+@main.command()
+@click.option('--model', required=True, help='Path to trained model file')
+@click.option('--input-dir', required=True, help='Input directory with images')
+@click.option('--output-dir', required=True, help='Output directory for predictions')
+@click.option('--explain', is_flag=True, help='Generate Grad-CAM for all images')
+@click.option('--format', default='csv', type=click.Choice(['json', 'csv']), help='Output format')
+@click.option('--batch', default=32, help='Batch size')
+def batch_predict(model, input_dir, output_dir, explain, format, batch):
+    """Process multiple images in batch."""
+    
+    setup_logging(log_level='INFO')
+    ensure_dir(output_dir)
+    
+    logger.info("=" * 80)
+    logger.info("PLANT DISEASE DETECTOR - BATCH PREDICTION")
+    logger.info("=" * 80)
+    
+    # Device
+    device = get_device()
+    
+    # Load class names
+    model_dir = os.path.dirname(model)
+    class_names_path = os.path.join(model_dir, 'class_names.txt')
+    
+    with open(class_names_path, 'r') as f:
+        class_names = [line.strip() for line in f if line.strip()]
+    
+    # Get image files
+    image_files = []
+    for ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+        image_files.extend(Path(input_dir).glob(f'*{ext}'))
+        image_files.extend(Path(input_dir).glob(f'*{ext.upper()}'))
+    
+    image_files = [str(f) for f in image_files if validate_image_file(str(f))]
+    
+    logger.info(f"Found {len(image_files)} images")
+    
+    if not image_files:
+        logger.error("No valid images found!")
+        return
+    
+    # Create predictor
+    predictor = PlantDiseasePredictor(
+        model_path=model,
+        class_names=class_names,
+        device=device
+    )
+    
+    # Batch predict
+    results = predictor.predict_batch(image_files, batch_size=batch)
+    
+    # Save results
+    output_file = os.path.join(output_dir, f'predictions.{format}')
+    save_predictions(results, output_file, format=format)
+    
+    # Generate Grad-CAM if requested
+    if explain:
+        logger.info("Generating Grad-CAM visualizations...")
+        
+        gradcam_dir = os.path.join(output_dir, 'gradcam')
+        ensure_dir(gradcam_dir)
+        
+        from src.data.augmentations import load_and_preprocess_image
+        gradcam = GradCAM(predictor.model)
+        
+        for img_path in image_files[:10]:  # Limit to first 10 for demo
+            try:
+                preprocessed, original = load_and_preprocess_image(img_path)
+                input_tensor = preprocessed.unsqueeze(0).to(device)
+                
+                output_path = os.path.join(gradcam_dir, f"gradcam_{Path(img_path).stem}.jpg")
+                gradcam.save_visualization(original, input_tensor, output_path)
+            except Exception as e:
+                logger.error(f"Error generating Grad-CAM for {img_path}: {e}")
+    
+    logger.info(f"Batch prediction completed! Results saved to {output_file}")
+
+
+@main.command()
+@click.option('--model', required=True, help='Path to trained model file')
+@click.option('--port', default=8501, help='Port number')
+@click.option('--host', default='localhost', help='Host address')
+def serve(model, port, host):
+    """Launch Streamlit web UI."""
+    
+    logger = logging.getLogger("plant_disease_detector")
+    setup_logging(log_level='INFO')
+    
+    logger.info("=" * 80)
+    logger.info("PLANT DISEASE DETECTOR - WEB UI")
+    logger.info("=" * 80)
+    
+    # Set environment variables for Streamlit app
+    os.environ['MODEL_PATH'] = model
+    os.environ['MODEL_DIR'] = os.path.dirname(model)
+    
+    # Launch Streamlit
+    import subprocess
+    
+    app_path = Path(__file__).parent / 'serve' / 'app_streamlit.py'
+    
+    cmd = [
+        'streamlit', 'run',
+        str(app_path),
+        '--server.port', str(port),
+        '--server.address', host,
+        '--server.headless', 'true'
+    ]
+    
+    logger.info(f"Starting Streamlit app at http://{host}:{port}")
+    logger.info("Press Ctrl+C to stop the server")
+    
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        logger.info("Server stopped")
+
+
+if __name__ == '__main__':
+    main()
